@@ -793,6 +793,27 @@ class URLToASCIITest(TestCase):
             # ASCII URLs are unchanged, even if they are unusual.
             ("http://example.com/a b%41?#", "http://example.com/a b%41?#"),
             ("http://caf\u00e9.example/", "http://xn--caf-dma.example/"),
+            # Case and normalization form don't change the name.
+            ("http://CAF\u00c9.Example/", "http://xn--caf-dma.Example/"),
+            ("http://cafe\u0301.example/", "http://xn--caf-dma.example/"),
+            # IDNA maps a final capital sigma to "σ" (str.lower() gives "ς").
+            (
+                "http://example.\u0391\u0398\u0397\u039d\u0391\u03a3/",
+                "http://example.xn--mxaard0a1b/",
+            ),
+            # IDNA also separates labels with ideographic and fullwidth stops.
+            ("http://\u4f8b\u3048\u3002jp/", "http://xn--r8jz45g.jp/"),
+            ("http://\u4f8b\u3048\uff61jp/", "http://xn--r8jz45g.jp/"),
+            ("http://\u4f8b\u3048\uff0ejp/", "http://xn--r8jz45g.jp/"),
+            # Ignorable characters are dropped, as browsers do.
+            ("http://ex\u00adample.com/", "http://example.com/"),
+            ("http://i\u2764\ufe0f.ws/", "http://xn--i-7iq.ws/"),
+            # ASCII labels are left alone, including IDNA2008 A-labels.
+            ("http://xn--strae-oqa.de/\u00e9", "http://xn--strae-oqa.de/%C3%A9"),
+            (
+                "http://xn--caf-dma.b\u00fccher.de/",
+                "http://xn--caf-dma.xn--bcher-kva.de/",
+            ),
             (
                 "https://u\u00e9:p\u00e9@caf\u00e9.example:8080/\u00e9?\u00e9=1#\u00e9",
                 "https://u%C3%A9:p%C3%A9@xn--caf-dma.example:8080/%C3%A9?%C3%A9=1#%C3%A9",
@@ -812,7 +833,21 @@ class URLToASCIITest(TestCase):
                 self.assertEqual(_url_to_ascii(url), expected)
 
     def test_invalid_hostname(self):
-        for url in ["http://a..b\u00e9/", "http://" + "\u00e9" * 64 + ".example/"]:
+        for url in [
+            "http://a..b\u00e9/",
+            "http://" + "\u00e9" * 64 + ".example/",
+            # IDNA2003 would turn these into the different hosts strasse.de
+            # and ab.com (browsers use xn--strae-oqa.de and reject the second).
+            "http://stra\u00dfe.de/",
+            "http://a\u200db.com/",
+            # Likewise a final "ς" would become "σ" (browsers keep it), and
+            # U+2024 ONE DOT LEADER would split the label (browsers reject it).
+            "http://example.\u03b1\u03b8\u03b7\u03bd\u03b1\u03c2/",
+            "http://a\u2024b.com/",
+            # IDNA2003 drops U+1806 MONGOLIAN TODO SOFT HYPHEN, but unlike the
+            # ignorable characters, browsers keep it.
+            "http://a\u1806b.com/",
+        ]:
             with self.subTest(url=url):
                 with self.assertRaises(ValueError):
                     _url_to_ascii(url)

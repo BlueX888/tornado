@@ -1370,6 +1370,12 @@ def doctests() -> unittest.TestSuite:
 
 _netloc_re = re.compile(r"^(.+):([0-9]+)$")
 
+# Characters that both IDNA2003 and browsers drop from hostnames. (IDNA2003
+# also drops zero-width joiners and U+1806, but browsers keep those.)
+_idna_ignored_re = re.compile(
+    r"[\u00ad\u034f\u180b-\u180d\u200b\u2060\ufe00-\ufe0f\ufeff]"
+)
+
 
 def _url_to_ascii(url: str) -> str:
     """Converts ``url`` to an ASCII URL that can be sent in a request.
@@ -1379,7 +1385,9 @@ def _url_to_ascii(url: str) -> str:
     percent-encoded as UTF-8, as browsers do. Other characters, including
     existing percent-escapes, are left alone, so ASCII URLs are unchanged.
 
-    Raises `ValueError` if the hostname cannot be converted.
+    Raises `ValueError` if the hostname cannot be converted, including when
+    Python's IDNA2003 codec would not preserve it (``straße.de`` would
+    become ``strasse.de``, while browsers use ``xn--strae-oqa.de``).
     """
     if url.isascii():
         return url
@@ -1392,9 +1400,31 @@ def _url_to_ascii(url: str) -> str:
             host, port = match.groups()
         if not host.isascii():
             try:
-                host = host.encode("idna").decode("ascii")
+                ascii_host = host.encode("idna").decode("ascii")
+                labels = re.split(r"[.\u3002\uff0e\uff61]", host)  # IDNA dots
+                round_trips = [
+                    (label, ascii_label.encode("ascii").decode("idna"))
+                    for label, ascii_label in zip(labels, ascii_host.split("."))
+                    if not label.isascii()
+                ]
             except UnicodeError as e:
                 raise ValueError("Invalid hostname %r: %s" % (host, e)) from e
+            # Python's idna codec implements IDNA2003, which maps some
+            # characters that browsers keep (such as "ß", "ς" and zero-width
+            # joiners) to others or to nothing, producing a different valid
+            # name. Reject labels that don't decode back to themselves, up to
+            # ignorable characters, NFKC and case (IDNA maps a final "Σ" to
+            # "σ", unlike str.lower()). Where browsers still differ, as before,
+            # the name sent isn't valid IDNA2008.
+            for label, round_trip in round_trips:
+                label = _idna_ignored_re.sub("", label)
+                label = unicodedata.normalize("NFKC", label).replace("Σ", "σ")
+                if round_trip != label.lower():
+                    raise ValueError(
+                        "Invalid hostname %r: IDNA2003 encoding %r does not round-trip"
+                        % (host, ascii_host)
+                    )
+            host = ascii_host
         # Replace the netloc in place rather than reassembling the URL with
         # urlunsplit, which would drop an empty query or fragment.
         start = url.find("//" + netloc)
